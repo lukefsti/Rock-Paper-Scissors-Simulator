@@ -36,7 +36,7 @@ MEMORY_EFFECT_RADIUS = 250
 
 GROUP_THRESHOLD = 3
 
-VIEW_RANGE = 500
+VIEW_RANGE = 200
 
 rock_kill_score = 0
 paper_kill_score = 0
@@ -106,19 +106,66 @@ class Element:
     def within_boundaries(self, new_x, new_y):
         return 0 <= new_x <= WIDTH and 0 <= new_y <= HEIGHT
 
-    def adjust_for_boundaries(self):
-        if self.x + self.dx < 0:
-            self.x = 0
-            self.dx = -self.dx
-        elif self.x + self.dx > WIDTH:
-            self.x = WIDTH
-            self.dx = -self.dx
-        if self.y + self.dy < 0:
-            self.y = 0
-            self.dy = -self.dy
-        elif self.y + self.dy > HEIGHT:
-            self.y = HEIGHT
-            self.dy = -self.dy
+    def get_feelers(self):
+        feeler_length = 50  # or however long you need them
+        # Center feeler
+        center_feeler = (self.x + self.dx * feeler_length, self.y + self.dy * feeler_length)
+        # Two side feelers; you can adjust the angle to your liking
+        left_feeler = (self.x + math.cos(math.atan2(self.dy, self.dx) + math.radians(45)) * feeler_length,
+                    self.y + math.sin(math.atan2(self.dy, self.dx) + math.radians(45)) * feeler_length)
+        right_feeler = (self.x + math.cos(math.atan2(self.dy, self.dx) - math.radians(45)) * feeler_length,
+                        self.y + math.sin(math.atan2(self.dy, self.dx) - math.radians(45)) * feeler_length)
+        return [center_feeler, left_feeler, right_feeler]
+
+    def wall_avoidance(self):
+        # Fetch the feelers
+        feelers = self.get_feelers()
+        
+        # Check each feeler for boundary intersection
+        for feeler in feelers:
+            if not self.within_boundaries(feeler[0], feeler[1]):
+                # If any feeler intersects the wall, we should steer away
+                self.dx = -self.dx
+                self.dy = -self.dy
+                return  # We've found a wall, so no need to check other feelers
+
+
+
+    def adjust_for_boundaries(self, elements):
+        # Constants
+        LEFT_BOUND = 0
+        RIGHT_BOUND = WIDTH
+        TOP_BOUND = 0
+        BOTTOM_BOUND = HEIGHT
+
+        # Function to check if any entity is nearby
+        def entities_nearby(new_x, new_y, elements):
+            for elem in elements:
+                if elem.type != self.type:
+                    dist = ((new_x - elem.x) ** 2 + (new_y - elem.y) ** 2) ** 0.5
+                    if dist < VIEW_RANGE:
+                        return True
+            return False
+
+        # Identify the boundary the entity crossed and adjust its position
+        if self.x < LEFT_BOUND:
+            self.x = LEFT_BOUND
+            while entities_nearby(self.x, self.y, elements) and self.x <= RIGHT_BOUND:
+                self.x += 1
+        elif self.x > RIGHT_BOUND:
+            self.x = RIGHT_BOUND
+            while entities_nearby(self.x, self.y, elements) and self.x >= LEFT_BOUND:
+                self.x -= 1
+        elif self.y < TOP_BOUND:
+            self.y = TOP_BOUND
+            while entities_nearby(self.x, self.y, elements) and self.y <= BOTTOM_BOUND:
+                self.y += 1
+        elif self.y > BOTTOM_BOUND:
+            self.y = BOTTOM_BOUND
+            while entities_nearby(self.x, self.y, elements) and self.y >= TOP_BOUND:
+                self.y -= 1
+
+
 
 
     def move(self):
@@ -261,6 +308,35 @@ class Element:
             self.type = "scissors"
         elif other.type == "paper" and self.type == "rock":
             self.type = "paper"
+        
+    def distance_to_wall(self, x, y, dx, dy):
+        distance = 0
+        while self.within_boundaries(x + dx, y + dy):
+            x += dx
+            y += dy
+            distance += 1
+        return distance
+
+    def advanced_flee(self, threat_x, threat_y):
+        angle_from_target = math.atan2(self.y - threat_y, self.x - threat_x)
+        best_angle = angle_from_target
+        best_distance = 0
+        
+        # Check in multiple directions (e.g., 15 degrees apart)
+        for offset_angle in range(-45, 45, 15):
+            test_angle = angle_from_target + math.radians(offset_angle)
+            dx = math.cos(test_angle)
+            dy = math.sin(test_angle)
+            
+            distance = self.distance_to_wall(self.x, self.y, dx, dy)
+            if distance > best_distance:
+                best_distance = distance
+                best_angle = test_angle
+        
+        # Set the entity's direction to the best flee direction
+        self.dx = math.cos(best_angle) * FLEEING_SPEED
+        self.dy = math.sin(best_angle) * FLEEING_SPEED
+
             
     def hunt_and_flee(self, elements, smart_ai=True):
 
@@ -399,9 +475,8 @@ class Element:
                 self.time_in_status = time.time()
                 self.duration_in_status = random.uniform(0.1, 1)
         elif should_flee and nearest_flee_target:
-            angle_from_target = math.atan2(self.y - nearest_flee_target.y, self.x - nearest_flee_target.x)
-            self.dx = math.cos(angle_from_target) * FLEEING_SPEED
-            self.dy = math.sin(angle_from_target) * FLEEING_SPEED
+            self.advanced_flee(nearest_flee_target.x, nearest_flee_target.y)
+            self.wall_avoidance()
             if self.status != "flee" or random.random() < 0.1:  # 10% chance to reset flee timer
                 self.status = "flee"
                 self.action = "Directing away from threat"
@@ -419,7 +494,7 @@ class Element:
                 self.duration_in_status = random.uniform(0.1, 1)  # Keeping it consistent for normal mode too
 
         if not self.within_boundaries(self.x + self.dx, self.y + self.dy):
-            self.adjust_for_boundaries()
+            #self.adjust_for_boundaries(elements)
             self.action = "Adjusting for boundary conditions"
 
 
