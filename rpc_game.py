@@ -6,6 +6,7 @@ import math
 import tkinter as tk
 from tkinter import simpledialog, messagebox, Entry, IntVar, Checkbutton, Button
 import configparser
+import time
 
 config = configparser.ConfigParser()
 config.read('settings.ini')
@@ -22,9 +23,18 @@ BLUE = (0, 0, 255)
 
 SPEED_MULTIPLIER = 1.0
 
+MAX_ENERGY = 1000.0
+ENERGY_THRESHOLD = 2.0
+ENERGY_CONSUMPTION_RATE = 1.5
+
 NORMAL_SPEED = 1.0
 FLEEING_SPEED = 1.5
 HUNTING_SPEED = 2.0
+
+MEMORY_DURATION = 10
+MEMORY_EFFECT_RADIUS = 250
+
+GROUP_THRESHOLD = 3
 
 VIEW_RANGE = 500
 
@@ -86,6 +96,12 @@ class Element:
         self.y = y
         self.status = "normal"  # Can be 'hunt', 'flee', or 'normal'
         self.dx, self.dy = random.choice(DIRECTIONS)
+        self.time_in_status = time.time()  # Set the current time when status is assigned
+        self.duration_in_status = 0  # Duration for which the entity should be in its current status
+        self.action = ""
+        self.energy = MAX_ENERGY
+        self.last_seen_threats = {}  # Memory for last-seen threats: {"type": [x, y, timestamp]}
+
     
     def within_boundaries(self, new_x, new_y):
         return 0 <= new_x <= WIDTH and 0 <= new_y <= HEIGHT
@@ -142,7 +158,8 @@ class Element:
             rotated_image = self.rotate_image(Element.scissors_img, angle)
             screen.blit(rotated_image, (self.x - rotated_image.get_width() // 2, self.y - rotated_image.get_height() // 2))
 
-        # Adjust y-coordinate to display status icons below the main icons
+        #Adjust y-coordinate to display status icons below the main icons
+        # Status icons below the main icons
         if smart_move:
             status_y_position = self.y + Element.IMAGE_SIZE[1] // 2
             if self.status == "hunt":
@@ -151,6 +168,17 @@ class Element:
                 screen.blit(Element.flee_icon, (self.x + Element.IMAGE_SIZE[0]//2 - Element.MODE_SIZE[0]//2, status_y_position))
             else:
                 screen.blit(Element.normal_icon, (self.x + Element.IMAGE_SIZE[0]//2 - Element.MODE_SIZE[0]//2, status_y_position))
+
+        # Create text to display current mode and action
+        text_string = f"{self.action.capitalize()}"
+        text_surface = FONT.render(text_string, True, RED)
+        
+        # Decide where you want the text to appear. 
+        # For this example, it'll appear to the right of the element.
+        text_x_position = self.x + Element.IMAGE_SIZE[0] // 2 + 10
+        text_y_position = self.y - Element.IMAGE_SIZE[1] // 2
+        
+        screen.blit(text_surface, (text_x_position, text_y_position))
 
     
     def collide_and_bounce(self, other):
@@ -209,6 +237,14 @@ class Element:
         angle = math.atan2(other.y - mid_y, other.x - mid_x)
         other.dx = math.cos(angle)
         other.dy = math.sin(angle)
+    
+    def distance(self, x, y):
+        return ((self.x - x) ** 2 + (self.y - y) ** 2) ** 0.5
+
+    def flee_from_position(self, x, y):
+        angle_from_position = math.atan2(self.y - y, self.x - x)
+        self.dx = math.cos(angle_from_position) * FLEEING_SPEED
+        self.dy = math.sin(angle_from_position) * FLEEING_SPEED
 
     def collide(self, other):
         # When two elements collide
@@ -226,7 +262,34 @@ class Element:
         elif other.type == "paper" and self.type == "rock":
             self.type = "paper"
             
-    def hunt_and_flee(self, elements):
+    def hunt_and_flee(self, elements, smart_ai=True):
+
+
+
+        if self.energy < ENERGY_THRESHOLD:
+            self.status = "rest"
+            self.action = "Resting to regain energy"
+            self.energy += 50
+            return
+        
+        # Group behavior
+        same_type_entities = [e for e in elements if e.type == self.type and e != self]
+        if len(same_type_entities) > GROUP_THRESHOLD:
+            avg_dx = sum([e.dx for e in same_type_entities]) / len(same_type_entities)
+            avg_dy = sum([e.dy for e in same_type_entities]) / len(same_type_entities)
+            self.dx = avg_dx
+            self.dy = avg_dy
+            self.action = "Group behavior"
+            self.status = "normal"
+        
+        for threat_type, data in self.last_seen_threats.items():
+            x, y, timestamp = data
+            time_since_seen = time.time() - timestamp
+            if time_since_seen < MEMORY_DURATION and self.distance(x, y) < MEMORY_EFFECT_RADIUS:
+                self.action = "Fleeing based on memory"
+                self.status = "flee"
+                self.flee_from_position(x, y)
+
         hunt_targets = {
             "rock": "scissors",
             "scissors": "paper",
@@ -239,50 +302,126 @@ class Element:
             "paper": "scissors"
         }
 
-        vision_radius = VIEW_RANGE  # radius within which an entity can "see" others
+        vision_radius = VIEW_RANGE
 
-        nearest_hunt_target = None
-        nearest_flee_target = None
-
+        counts = {"rock": 0, "scissors": 0, "paper": 0}
         nearest_hunt_distance = float('inf')
         nearest_flee_distance = float('inf')
+        nearest_hunt_target = None
+        nearest_flee_target = None
 
         for elem in elements:
             if elem == self:  # skip itself
                 continue
             dist = ((self.x - elem.x) ** 2 + (self.y - elem.y) ** 2) ** 0.5
             if dist < vision_radius:
-                # Find the nearest target to hunt
+                counts[elem.type] += 1
                 if elem.type == hunt_targets[self.type] and dist < nearest_hunt_distance:
                     nearest_hunt_distance = dist
                     nearest_hunt_target = elem
-                # Find the nearest target to flee from
                 elif elem.type == flee_targets[self.type] and dist < nearest_flee_distance:
                     nearest_flee_distance = dist
                     nearest_flee_target = elem
-        
-        
+        if smart_ai:
+            # Differences in counts
+            hunt_difference = counts[hunt_targets[self.type]] - counts[self.type]
 
-        if nearest_hunt_target:
+            # Calculate ratios
+            threat_ratio = 0 if (counts[self.type] + counts[hunt_targets[self.type]]) == 0 else counts[flee_targets[self.type]] / (counts[self.type] + counts[hunt_targets[self.type]])
+            opportunity_ratio = 0 if (counts[self.type] + counts[flee_targets[self.type]]) == 0 else counts[hunt_targets[self.type]] / (counts[self.type] + counts[flee_targets[self.type]])
+
+            # Thresholds
+            IMMEDIATE_THREAT_DISTANCE = vision_radius * 0.25  # if a threat is within 25% of the vision range
+            OPPORTUNITY_RATIO_THRESHOLD = 2.0  # Requires a higher ratio for hunting to ensure it's a clear opportunity
+
+            # Weights for decision making
+            PROXIMITY_WEIGHT = 0.6  # We give more weight to proximity than numbers
+            RATIO_WEIGHT = 0.4
+
+            # Decision based on situations
+
+            # 1. Flee from immediate threats.
+            if nearest_flee_distance < IMMEDIATE_THREAT_DISTANCE:
+                should_hunt = False
+                should_flee = True
+                self.energy -= ENERGY_CONSUMPTION_RATE
+                self.last_seen_threats[nearest_flee_target.type] = [nearest_flee_target.x, nearest_flee_target.y, time.time()]
+                self.action = "Fleeing from immediate threat"
+                self.status = "flee"
+            else:
+                # 2. Hunt when there's a clear opportunity.
+                if opportunity_ratio > OPPORTUNITY_RATIO_THRESHOLD and hunt_difference > 2:
+                    should_hunt = True
+                    should_flee = False
+                    self.energy -= ENERGY_CONSUMPTION_RATE
+                    self.action = "Hunting due to clear opportunity"
+                    self.status = "hunt"
+                else:
+                    # 3. Consider general threat-to-opportunity ratios.
+                    
+                    # Calculate a threat score considering both proximity and ratio
+                    threat_score = PROXIMITY_WEIGHT * (1 - (nearest_flee_distance / vision_radius)) + RATIO_WEIGHT * threat_ratio
+                    opportunity_score = PROXIMITY_WEIGHT * (1 - (nearest_hunt_distance / vision_radius)) + RATIO_WEIGHT * opportunity_ratio
+                    
+                    if threat_score > opportunity_score:
+                        should_hunt = False
+                        should_flee = True
+                        self.energy -= ENERGY_CONSUMPTION_RATE
+                        self.last_seen_threats[nearest_flee_target.type] = [nearest_flee_target.x, nearest_flee_target.y, time.time()]
+                        self.action = "Fleeing based on threat score"
+                        self.status = "flee"
+                    elif opportunity_score > threat_score:
+                        should_hunt = True
+                        should_flee = False
+                        self.energy -= ENERGY_CONSUMPTION_RATE
+                        self.action = "Hunting based on opportunity score"
+                        self.status = "hunt"
+                    else:
+                        # 4. Default to wandering or 'normal' if no clear decision emerges.
+                        should_hunt = False
+                        should_flee = False
+                        self.action = "Wandering/Normally"
+                        self.status = "normal"
+        else:  # simple decision logic
+            should_hunt = nearest_hunt_target is not None
+            should_flee = nearest_flee_target is not None
+        # Check if the entity should continue in its current state based on time
+        if time.time() - self.time_in_status < self.duration_in_status:
+            return  # Maintain current status and direction
+
+        if should_hunt and nearest_hunt_target:
             angle_to_target = math.atan2(nearest_hunt_target.y - self.y, nearest_hunt_target.x - self.x)
             self.dx = math.cos(angle_to_target) * HUNTING_SPEED
             self.dy = math.sin(angle_to_target) * HUNTING_SPEED
-            self.status = "hunt"
-        elif nearest_flee_target:
+            if self.status != "hunt":
+                self.status = "hunt"
+                self.action = "Directing towards hunt target"
+                self.time_in_status = time.time()
+                self.duration_in_status = random.uniform(0.1, 1)
+        elif should_flee and nearest_flee_target:
             angle_from_target = math.atan2(self.y - nearest_flee_target.y, self.x - nearest_flee_target.x)
             self.dx = math.cos(angle_from_target) * FLEEING_SPEED
             self.dy = math.sin(angle_from_target) * FLEEING_SPEED
-            self.status = "flee"
+            if self.status != "flee" or random.random() < 0.1:  # 10% chance to reset flee timer
+                self.status = "flee"
+                self.action = "Directing away from threat"
+                self.time_in_status = time.time()
+                self.duration_in_status = random.uniform(0.1, 2.5)
         else:
             base_dx = math.copysign(NORMAL_SPEED, self.dx)
             base_dy = math.copysign(NORMAL_SPEED, self.dy)
             self.dx = base_dx
             self.dy = base_dy
-            self.status = "normal"
+            if self.status != "normal":
+                self.status = "normal"
+                self.action = "Maintaining normal movement"
+                self.time_in_status = time.time()
+                self.duration_in_status = random.uniform(0.1, 1)  # Keeping it consistent for normal mode too
 
-        # Check and adjust for boundaries after deciding the direction
         if not self.within_boundaries(self.x + self.dx, self.y + self.dy):
             self.adjust_for_boundaries()
+            self.action = "Adjusting for boundary conditions"
+
 
 def clear_screen(screen, color=(0, 0, 0)):
     screen.fill(color)
@@ -406,6 +545,7 @@ def main(x, y, z):
                     if SPEED_MULTIPLIER < 0.1:  # Ensure speed doesn't go negative or too slow
                         SPEED_MULTIPLIER = 0.1
     pygame.quit()
+    #main(x, y, z)
 
 def settings_window():
     settings_win = tk.Tk()
@@ -505,10 +645,10 @@ def get_game_parameters():
     window.attributes('-fullscreen', False)
 
     # Variables to hold input values
-    rock_var = IntVar()
-    paper_var = IntVar()
-    scissors_var = IntVar()
-    ai_var = IntVar()  # 1 if AI should be turned on, 0 otherwise
+    rock_var = IntVar(value=10)
+    paper_var = IntVar(value=10)
+    scissors_var = IntVar(value=10)
+    ai_var = IntVar(value=1)  # 1 if AI should be turned on, 0 otherwise
 
     # Validation function for positive numbers
     def validate_positive_number(P):
